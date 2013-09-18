@@ -64,6 +64,7 @@ drivers/net/wireless/ipw2x00/
 drivers/net/wireless/ti/
 drivers/net/wireless/orinoco/
 drivers/net/wireless/mwifiex/
+drivers/net/wireless/mwl8787/
 drivers/net/wireless/adm8211.c
 drivers/net/wireless/adm8211.h
 drivers/net/wireless/at76c50x-usb.c
