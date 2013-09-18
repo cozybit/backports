@@ -1,0 +1,196 @@
+From ae81db7ca591640daafdd327a96e7af65e2365e5 Mon Sep 17 00:00:00 2001
+From: Guillermo A Nunez <guillermo@cozybit.com>
+Date: Tue, 17 Sep 2013 12:28:09 -0700
+Subject: [PATCH] nl80211: Added NL80211_CMD_GET_MESH_SETUP
+
+This patch allow userspace applications to get the info from mesh_setup struct.
+---
+ include/net/cfg80211.h       |  5 ++-
+ include/uapi/linux/nl80211.h |  1 +
+ net/mac80211/cfg.c           | 31 ++++++++++++++++++
+ net/wireless/nl80211.c       | 78 ++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 114 insertions(+), 1 deletion(-)
+
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index 07b2248..98f4573 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -1160,7 +1160,7 @@ struct mesh_config {
+  */
+ struct mesh_setup {
+ 	struct cfg80211_chan_def chandef;
+-	const u8 *mesh_id;
++	u8 *mesh_id;
+ 	u8 mesh_id_len;
+ 	u8 sync_method;
+ 	u8 path_sel_proto;
+@@ -2078,6 +2078,9 @@ struct cfg80211_ops {
+ 	int	(*update_mesh_config)(struct wiphy *wiphy,
+ 				      struct net_device *dev, u32 mask,
+ 				      const struct mesh_config *nconf);
++	int	(*get_mesh_setup)(struct wiphy *wiphy,
++				  struct net_device *dev,
++				  struct mesh_setup *setup);
+ 	int	(*join_mesh)(struct wiphy *wiphy, struct net_device *dev,
+ 			     const struct mesh_config *conf,
+ 			     const struct mesh_setup *setup);
+diff --git a/include/uapi/linux/nl80211.h b/include/uapi/linux/nl80211.h
+index d1e48b5..4fecf92 100644
+--- a/include/uapi/linux/nl80211.h
++++ b/include/uapi/linux/nl80211.h
+@@ -808,6 +808,7 @@ enum nl80211_commands {
+ 	NL80211_CMD_CRIT_PROTOCOL_START,
+ 	NL80211_CMD_CRIT_PROTOCOL_STOP,
+ 
++	NL80211_CMD_GET_MESH_SETUP = 0x100,
+ 	/* add new commands above here */
+ 
+ 	/* used to define NL80211_CMD_MAX below */
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 7aab172..7e8aa5e 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -1757,6 +1757,36 @@ static int copy_mesh_setup(struct ieee80211_if_mesh *ifmsh,
+ 	return 0;
+ }
+ 
++static int ieee80211_get_mesh_setup(struct wiphy *wiphy,
++				    struct net_device *dev,
++				    struct mesh_setup *setup)
++{
++	struct ieee80211_sub_if_data *sdata;
++	struct ieee80211_if_mesh *ifmsh;
++
++	sdata = IEEE80211_DEV_TO_SUB_IF(dev);
++	ifmsh = &sdata->u.mesh;
++
++	if (!ifmsh->mesh_id_len)
++		return -ENOLINK;
++
++	setup->mesh_id = kmalloc(ifmsh->mesh_id_len, GFP_KERNEL);
++	if (!setup->mesh_id)
++		return -ENOMEM;
++
++	setup->mesh_id_len = ifmsh->mesh_id_len;
++	memcpy(setup->mesh_id, ifmsh->mesh_id, setup->mesh_id_len);
++	setup->sync_method = ifmsh->mesh_sp_id;
++	setup->path_sel_proto = ifmsh->mesh_pp_id;
++	setup->path_metric = ifmsh->mesh_pm_id;
++	setup->is_authenticated = ifmsh->security & IEEE80211_MESH_SEC_AUTHED;
++	setup->is_secure = ifmsh->security & IEEE80211_MESH_SEC_SECURED;
++
++	memcpy(setup->mcast_rate, sdata->vif.bss_conf.mcast_rate,
++		sizeof(sdata->vif.bss_conf.mcast_rate));
++	return 0;
++}
++
+ static int ieee80211_update_mesh_config(struct wiphy *wiphy,
+ 					struct net_device *dev, u32 mask,
+ 					const struct mesh_config *nconf)
+@@ -3432,6 +3462,7 @@ struct cfg80211_ops mac80211_config_ops = {
+ 	.dump_mpath = ieee80211_dump_mpath,
+ 	.update_mesh_config = ieee80211_update_mesh_config,
+ 	.get_mesh_config = ieee80211_get_mesh_config,
++	.get_mesh_setup = ieee80211_get_mesh_setup,
+ 	.join_mesh = ieee80211_join_mesh,
+ 	.leave_mesh = ieee80211_leave_mesh,
+ #endif
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 0ce3f6f..83e82bb 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -4607,6 +4607,76 @@ static int nl80211_get_mesh_config(struct sk_buff *skb,
+ 	return -ENOBUFS;
+ }
+ 
++static int nl80211_get_mesh_setup(struct sk_buff *skb,
++				  struct genl_info *info)
++{
++	struct cfg80211_registered_device *rdev = info->user_ptr[0];
++	struct net_device *dev = info->user_ptr[1];
++	struct wireless_dev *wdev = dev->ieee80211_ptr;
++	struct mesh_setup setup;
++	int err = 0;
++	void *hdr;
++	struct nlattr *pinfoattr;
++	struct sk_buff *msg;
++
++	if (wdev->iftype != NL80211_IFTYPE_MESH_POINT)
++		return -EOPNOTSUPP;
++
++	if (!rdev->ops->get_mesh_setup)
++		return -EOPNOTSUPP;
++
++	wdev_lock(wdev);
++	err = rdev->ops->get_mesh_setup(&rdev->wiphy, dev, &setup);
++	wdev_unlock(wdev);
++
++	if (err)
++		return err;
++
++	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
++	if (!msg) {
++		err = -ENOMEM;
++		goto out;
++	}
++
++	err = -ENOBUFS;
++	hdr = nl80211hdr_put(msg, info->snd_pid, info->snd_seq, 0,
++			     NL80211_CMD_GET_MESH_SETUP);
++	if (!hdr)
++		goto out;
++
++	if (nla_put(msg, NL80211_ATTR_MESH_ID, setup.mesh_id_len,
++		    setup.mesh_id))
++		goto nla_put_failure;
++
++	pinfoattr = nla_nest_start(msg, NL80211_ATTR_MESH_SETUP);
++	if (!pinfoattr)
++		goto nla_put_failure;
++
++	if (nla_put_u8(msg, NL80211_MESH_SETUP_ENABLE_VENDOR_SYNC,
++		       setup.sync_method) ||
++	    nla_put_u8(msg, NL80211_MESH_SETUP_ENABLE_VENDOR_PATH_SEL,
++		       setup.path_sel_proto) ||
++	    nla_put_u8(msg, NL80211_MESH_SETUP_ENABLE_VENDOR_METRIC,
++		       setup.path_metric) ||
++	    (setup.is_authenticated &&
++	     nla_put_flag(msg, NL80211_MESH_SETUP_USERSPACE_AUTH)) ||
++	    (setup.is_secure &&
++	     nla_put_flag(msg, NL80211_MESH_SETUP_USERSPACE_AMPE)))
++		goto nla_put_failure;
++
++	nla_nest_end(msg, pinfoattr);
++	genlmsg_end(msg, hdr);
++	return genlmsg_reply(msg, info);
++
++ nla_put_failure:
++	genlmsg_cancel(msg, hdr);
++ out:
++	nlmsg_free(msg);
++	kfree(setup.mesh_id);
++	return err;
++
++}
++
+ static const struct nla_policy nl80211_meshconf_params_policy[NL80211_MESHCONF_ATTR_MAX+1] = {
+ 	[NL80211_MESHCONF_RETRY_TIMEOUT] = { .type = NLA_U16 },
+ 	[NL80211_MESHCONF_CONFIRM_TIMEOUT] = { .type = NLA_U16 },
+@@ -8995,6 +9065,14 @@ static struct genl_ops nl80211_ops[] = {
+ 		.flags = GENL_ADMIN_PERM,
+ 		.internal_flags = NL80211_FLAG_NEED_WDEV_UP |
+ 				  NL80211_FLAG_NEED_RTNL,
++	},
++	{
++		.cmd = NL80211_CMD_GET_MESH_SETUP,
++		.doit = nl80211_get_mesh_setup,
++		.policy = nl80211_policy,
++		.flags = GENL_ADMIN_PERM,
++		.internal_flags = NL80211_FLAG_NEED_NETDEV |
++				  NL80211_FLAG_NEED_RTNL,
+ 	}
+ };
+ 
+-- 
+1.8.3.rc3.8.g5e49f30.dirty
+
