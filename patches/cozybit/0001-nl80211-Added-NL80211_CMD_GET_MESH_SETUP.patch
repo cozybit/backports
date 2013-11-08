@@ -42,7 +42,7 @@ index d1e48b5..4fecf92 100644
  	NL80211_CMD_CRIT_PROTOCOL_START,
  	NL80211_CMD_CRIT_PROTOCOL_STOP,
  
-+	NL80211_CMD_GET_MESH_SETUP = 0x100,
++	NL80211_CMD_GET_MESH_SETUP = 0xff,
  	/* add new commands above here */
  
  	/* used to define NL80211_CMD_MAX below */
